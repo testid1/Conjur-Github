@@ -8,48 +8,60 @@ on:
 jobs:
   retrieve-secret:
     runs-on: ubuntu-latest
+    env:
+      # Conjur connection info, pulled from GitHub Secrets
+      CONJUR_ACCOUNT: conjur
+      CONJUR_APPLIANCE_URL: ${{ secrets.CONJUR_APPLIANCE_URL }}
+      CONJUR_AUTHN_LOGIN: ${{ secrets.CONJUR_AUTHN_LOGIN }}
+      CONJUR_API_KEY:   ${{ secrets.CONJUR_API_KEY }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Install curl and jq
-        run: sudo apt-get update && sudo apt-get install -y curl jq
-
-      - name: Authenticate to Conjur and retrieve secret
-        env:
-          CONJUR_ACCOUNT: conjur
-          CONJUR_APPLIANCE_URL: ${{ secrets.CONJUR_APPLIANCE_URL }}
-          CONJUR_AUTHN_LOGIN: ${{ secrets.CONJUR_AUTHN_LOGIN }}
-          CONJUR_API_KEY: ${{ secrets.CONJUR_API_KEY }}
         run: |
-          set -e
-          echo "Logging into Conjur..."
-          FULL_AUTHN_URL=$CONJUR_APPLIANCE_URL/api/authn/$CONJUR_ACCOUNT/$CONJUR_AUTHN_LOGIN/authenticate
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
+          sudo apt-get update && sudo apt-get install -y curl jq
+
+      - name: Authenticate and fetch Conjur secret
+        shell: bash
+        run: |
+          set -e  # → Exit immediately if any command exits with a non-zero status
+
+          # 1) Authenticate to Conjur
+          RESP=$(curl -s -w "\n%{http_code}" \
             --request POST \
             --data "$CONJUR_API_KEY" \
-            "$FULL_AUTHN_URL")
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          STATUS_CODE=$(echo "$RESPONSE" | tail -n1)
-          if [ "$STATUS_CODE" != "200" ]; then
-            echo "Authentication failed"
-            echo "$BODY"
-            exit 1
-          fi
-          AUTHN_TOKEN="$BODY"
-          echo "Authentication successful"
+            "$CONJUR_APPLIANCE_URL/api/authn/$CONJUR_ACCOUNT/$CONJUR_AUTHN_LOGIN/authenticate")
+          
+          TOKEN=$(echo "$RESP" | sed '$d')
+          CODE=$(echo "$RESP" | tail -n1)
 
-      - name: Fetch secret
-        run: |
-          RAW_PATH=data%2Fvault%2Fconjurtest%2Fmysecret%2Fpassword
-          SECRET_URL=$CONJUR_APPLIANCE_URL/api/secrets/$CONJUR_ACCOUNT/variable/$RAW_PATH
-          SECRET_RESPONSE=$(curl -s -w "\n%{http_code}" \
-            -H "Authorization: Token token=\"$AUTHN_TOKEN\"" \
-            "$SECRET_URL")
-          SECRET_VALUE=$(echo "$SECRET_RESPONSE" | sed '$d')
-          SECRET_STATUS=$(echo "$SECRET_RESPONSE" | tail -n1)
-          if [ "$SECRET_STATUS" != "200" ]; then
-            echo "Failed to fetch secret (status $SECRET_STATUS)"
-            exit 1
+          if [ "$CODE" != "200" ]; then
+            echo "❌ Authentication failed (status $CODE)"
+            echo "Response body: $TOKEN"
+            exit 1  # → Fail the step if auth didn’t return HTTP 200
           fi
-          echo "Retrieved secret: $SECRET_VALUE"
+
+          echo "✅ Authentication successful"
+
+          # 2) Build URL‑encoded path for the secret
+          RAW_PATH=data%2Fvault%2Fconjurtest%2Fmysecret%2Fpassword
+          FULL_URL="$CONJUR_APPLIANCE_URL/api/secrets/$CONJUR_ACCOUNT/variable/$RAW_PATH"
+
+          # 3) Fetch the secret, including HTTP status in the output
+          SECRET_RESP=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Token token=\"$TOKEN\"" \
+            "$FULL_URL")
+
+          SECRET=$(echo "$SECRET_RESP" | sed '$d')
+          FETCH_CODE=$(echo "$SECRET_RESP" | tail -n1)
+
+          if [ "$FETCH_CODE" != "200" ]; then
+            echo "❌ Secret fetch failed (status $FETCH_CODE)"
+            echo "Response body: $SECRET"
+            exit 1  # → Fail the step if fetch didn’t return HTTP 200
+          fi
+
+          # 4) Success!
+          echo "✅ Retrieved secret: $SECRET"
